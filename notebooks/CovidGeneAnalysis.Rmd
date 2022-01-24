@@ -1,0 +1,720 @@
+---
+title: "Covid Analysis Project"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Import libraries
+
+```{r}
+library(readxl)
+library(glmnet)
+library(Boruta)
+library(vita)
+library(randomForest)
+library(FSelector)
+library(rpart)
+library(VennDiagram)
+library(venn)
+library(RColorBrewer)
+library(ggfortify)
+library(cluster)
+library(ggplot2)
+library(tidyverse)
+library(hrbrthemes)
+library(viridis)
+library(factoextra)
+library(FactoMineR)
+```
+
+
+## Load data
+
+```{r}
+covid = read.csv('./dt.COVID_TCR.vjGene.p.csv', header = T) #Covid Patients
+hd = read.csv('./dt.HD_TCR.vjGene.p.csv', header = T) #Healthy Donors
+df = read_xlsx('./dt_combined.xlsx', col_names = TRUE) #Covid and Healthy Donor combined vertically 
+stt = read_xlsx('./dt.info_edited.xlsx', col_names = TRUE) #New data with patient statuses
+```
+
+
+## Log Transformation
+
+```{r}
+# log transformed
+df[is.na(df)] = 10^-7
+df_log = log(df[,-1])
+
+#standardize x
+for (i in 1:ncol(df_log))
+{
+  x=df_log[,i]
+  x.sd=(x-min(x))/(max(x)-min(x))
+  df_log[,i]=x.sd
+}
+
+# define y
+df_log$y = c(rep(1,70),rep(0,39)) #1: COVID; 0:HD
+df_log$y = as.factor(df_log$y)
+x1 = df_log[,-709]
+
+# Patient status and Data frame combined horizontally
+df_all = merge(stt, df, by="Sample.ID")
+df_all[is.na(df_all)] = 10^-7
+df_all_log = log(df_all[,-c(1:8)])
+
+df_all_log$disease.stage = df_all$disease.stage
+df_all_log$y[df_all_log$disease.stage=="healthy"] = 0
+df_all_log$y[df_all_log$disease.stage=="recovered"] = 1
+df_all_log$y[df_all_log$disease.stage=="active"] = 2
+
+#Sort disease.stage according to Active vs. Recovered and create a new data frame 
+subset_A = which(df_all_log$disease.stage== "active" )
+subset_R = which(df_all_log$disease.stage == "recovered")
+df_AR = df_all_log[c(subset_R,subset_A),]
+x_AR = df_AR[ ,-c(709:710)]
+
+#Sort disease.stage according to Healthy vs. Recovered and create a new data frame 
+subset_HR = which(df_all_log$disease.stage=="healthy" |df_all_log$disease.stage=="recovered")
+df_HR = df_all_log[subset_HR,]
+x_HR = df_HR[ ,-c(709:710)]
+
+```
+
+
+## T-Test
+
+```{r}
+t_result1 = apply(df[,-1], 2, function(x) {y1=x[1:70];y2=x[71:109];return(t.test(y1, y2, "two.sided")$p.value)})
+t_adj1 = p.adjust(t_result1)
+which(t_adj1 < 0.05)
+```
+
+
+## Wilcoxon Rank Sum Test
+
+```{r}
+### Wilcoxon for Healthy vs. Covid
+w_result1 = apply (df[,-1], 2, function(x) {y1 = x[1:70]; y2 = x[71:109]; return(wilcox.test(y1, y2)$p.value)})
+w_adjust1 = p.adjust(w_result1)
+wil_selected1 = names(w_adjust1[w_adjust1 < 0.5])
+```
+
+
+```{r}
+### Wilcoxon for Active vs. Recovered
+w_result2 = apply (df_AR[, -c(709:710)], 2, function(x) {y1 = x[1:19]; y2 = x[20:69]; return(wilcox.test(y1, y2)$p.value)})
+w_adjust2 = p.adjust(w_result2)
+wil_selected2 = names(w_adjust2[w_adjust2<0.5])
+wil_selected2 = wil_selected2[!is.na(wil_selected2)]
+```
+
+```{r}
+### Wilcoxon for Healthy vs. Recovered
+w_result3 = apply (df_HR[,-c(709:710)], 2, function(x) {y1 = x[1:19]; y2 = x[20:42]; return(wilcox.test(y1, y2, exact = FALSE)$p.value)})
+w_adjust3 = p.adjust(w_result3)
+wil_selected3 = names(w_adjust3[w_adjust3 < 0.5])
+wil_selected3 = wil_selected3[!is.na(wil_selected3)]
+```
+
+
+## Information Gain
+
+```{r}
+### Information Gain for Healthy vs. Covid
+info1 = information.gain(y~., df_log)
+info_selected1 = cutoff.biggest.diff(info1)
+```
+
+
+```{r}
+### Information Gain for Active vs. Recovered
+info2 = information.gain(y~., df_AR[, -709])
+info_selected2 = cutoff.biggest.diff(info2)
+```
+
+
+```{r}
+### Information Gain for Healthy vs. Recovered
+info3 = information.gain(y~., df_HR[, -709])
+info_selected3 = cutoff.biggest.diff(info3)
+```
+
+
+## Boruta
+
+```{r}
+### Boruta for Healthy vs. Covid
+boruta_out1 = Boruta(x1, df_log$y)
+boruta_selected1 = as.character(names(boruta_out1$finalDecision[boruta_out1$finalDecision!="Rejected"]))
+boruta_selected1 = gsub("`","", boruta_selected1)
+boruta_selected1 = gsub("\\.","-",boruta_selected1)
+```
+
+
+```{r}
+### Boruta for Active vs. Recovered
+boruta_out2 = Boruta(x_AR, df_AR$y)
+boruta_selected2 = as.character(names(boruta_out2$finalDecision[boruta_out2$finalDecision!="Rejected"]))
+```
+
+```{r}
+### Boruta for Healthy vs. Recovered 
+boruta_out3 = Boruta(x_HR, df_HR$y)
+boruta_selected3 = as.character(names(boruta_out3$finalDecision[boruta_out3$finalDecision!="Rejected"]))
+```
+
+
+## Vita
+
+```{r}
+### Vita for healthy vs. covid
+# Cross-validated permutation variable importance measure
+CV_PerVarImp1 = CVPVI(x1, df_log$y)
+# Novel Testing Approach
+nta_result1 = NTA(CV_PerVarImp1$cv_varim)
+vita_p1 = nta_result1$pvalue
+vita_selected1 = names(vita_p1[vita_p1<0.1,])
+vita_selected1 = as.character(vita_selected1)
+```
+
+
+```{r}
+### Vita for Active vs. Recovered
+df_AR$y = as.factor(df_AR$y)
+CV_PerVarImp2 = CVPVI(x_AR, df_AR$y)
+# Novel Testing Approach
+nta_result2 = NTA(CV_PerVarImp2$cv_varim)
+vita_p2 = nta_result2$pvalue
+vita_selected2 = names(vita_p2[vita_p2<0.1,])
+vita_selected2 = as.character(vita_selected2)
+```
+
+```{r}
+### Vita for Healthy vs. Recovered
+df_HR$y = as.factor(df_HR$y)
+CV_PerVarImp3 = CVPVI(x_HR, df_HR$y)
+# Novel Testing Approach
+nta_result3 = NTA(CV_PerVarImp3$cv_varim)
+vita_p3 = nta_result3$pvalue
+vita_selected3 = names(vita_p3[vita_p3<0.1,])
+vita_selected3 = as.character(vita_selected3)
+```
+
+
+## LASSO
+```{r}
+### Lasso for Active and Healthy Donor
+x1 = as.matrix(x1)
+set.seed(1)
+cv_out1 = cv.glmnet(x1, df_log$y, alpha=1,family="binomial")
+plot(cv_out1) #CV error plot
+bestlam_lasso1 = cv_out1$lambda.min 
+out_lasso1 = glmnet(x1, df_log$y, alpha=1, family = "binomial")
+lasso_coef1 = predict(out_lasso1, type="coefficients", s=bestlam_lasso1)
+lasso_selected1 = row.names(lasso_coef1)[which(lasso_coef1!=0)]
+lasso_selected1 = lasso_selected1[-1]
+lasso_selected1 = data.frame(lasso_selected1)
+lasso_selected1 = gsub("`","",lasso_selected1[,1])
+```
+
+
+
+```{r}
+### Lasso for Active vs. Recovered
+x_AR = as.matrix(x_AR)
+set.seed(1)
+cv_out2 = cv.glmnet(x_AR, df_AR$y, alpha=1,family="binomial")
+plot(cv_out2) #CV error plot
+bestlam_lasso2 = cv_out2$lambda.min 
+out_lasso2 = glmnet(x_AR, df_AR$y, alpha=1, family = "binomial")
+lasso_coef2 = predict(out_lasso2, x_AR, type="coefficients", s=bestlam_lasso2)
+lasso_selected2 = row.names(lasso_coef2)[which(lasso_coef2!=0)]
+lasso_selected2 = lasso_selected2[-1]
+lasso_selected2 = data.frame(lasso_selected2)
+lasso_selected2 = gsub("`","",lasso_selected2[,1])
+
+
+```
+
+
+
+
+```{r}
+### Lasso for Healthy vs. Recovered
+x_HR = as.matrix(x_HR)
+set.seed(1)
+cv_out3 = cv.glmnet(x_HR, df_HR$y, alpha=1,family="binomial")
+plot(cv_out3) #CV error plot
+bestlam_lasso3 = cv_out3$lambda.min 
+out_lasso3 = glmnet(x_HR, df_HR$y, alpha=1, family = "binomial")
+lasso_coef3 = predict(out_lasso3, x_HR, type="coefficients", s=bestlam_lasso3)
+lasso_selected3 = row.names(lasso_coef3)[which(lasso_coef3!=0)]
+lasso_selected3 = lasso_selected3[-1]
+lasso_selected3 = data.frame(lasso_selected3)
+lasso_selected3 = gsub("`","",lasso_selected3[,1])
+
+# lasso_selected_y0 = row.names(lasso_coef3$`0`)[which(lasso_coef3$`0`!=0)] #multinomial Lasso
+# lasso_selected_y1 = row.names(lasso_coef3$`1`)[which(lasso_coef3$`1`!=0)]
+# 
+# lasso_selected_y0 = lasso_selected_y0[-1]
+# lasso_selected_y1 = lasso_selected_y1[-1]
+# 
+# lasso_selected_y0 = data.frame(lasso_selected_y0)
+# lasso_selected_y0 = gsub("`","",lasso_selected_y0[,1])
+# 
+# lasso_selected_y1 = data.frame(lasso_selected_y1)
+# lasso_selected_y1 = gsub("`","",lasso_selected_y1[,1])
+```
+
+
+
+
+
+## Venn Diagram Comparison
+```{r}
+#Create the Venn diagram for HD vs Active Comparison
+venn(x = list(boruta_selected1, lasso_selected1, vita_selected1, info_selected1, wil_selected1),
+      snames = "Boruta , Lasso, Vita, Information Gain, Wilcoxon",
+      ilabels = TRUE,
+      zcolor = "style")
+
+#Create the Venn diagram for Active vs Recovered Comparison
+venn(x = list(boruta_selected2, lasso_selected2, vita_selected2, info_selected2, wil_selected2),
+      snames = "Boruta , Lasso, Vita, Information Gain, Wilcoxon",
+      ilabels = TRUE,
+      zcolor = "style")
+
+#Create the Venn diagram for Healthy vs Recovered Comparison
+venn(x = list(boruta_selected3, lasso_selected3, vita_selected3, info_selected3, wil_selected3),
+      snames = "Boruta , Lasso, Vita, Information Gain, Wilcoxon",
+      ilabels = TRUE,
+      zcolor = "style")
+
+#Commonly selected genes
+Reduce(intersect, list(boruta_selected1, lasso_selected1, vita_selected1, info_selected1, wil_selected1)) #genes best distinguish Healthy vs. Active
+Reduce(intersect, list(boruta_selected2, lasso_selected2, vita_selected2, info_selected2, wil_selected2)) #genes best distinguish Active vs. Recovered
+Reduce(intersect, list(boruta_selected3, lasso_selected3, vita_selected3, info_selected3, wil_selected3)) #genes best distinguish Healthy vs. Recovered 
+```
+
+
+## PCA Plots for HD and CV Patients
+```{r}
+df_log$status=c(rep("COVID",70),rep("Healthy",39)) #1: COVID; 0:HD
+df_log$y =as.numeric(df_log$y)
+
+###PCA for all genes
+pca_all1 = PCA(df_log[, -c(709:710)])
+#autoplot(pca_all1, data = df_log, colour = "status", title = "PCA for all genes")
+fviz_pca_ind(pca_all1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("No Feature Selection") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_all1_coords = pca_all1$ind$coord
+pca_all1_mean_CV = c(sum(pca_all1_coords[c(1:70),1])/70, sum(pca_all1_coords[c(1:70),2])/70)
+pca_all1_mean_HD = c(sum(pca_all1_coords[c(71:109),1])/39, sum(pca_all1_coords[c(71:109),2])/39)
+euclidean <- function(a, b) sqrt(sum((a - b)^2))
+pca_all1_distance = euclidean(pca_all1_mean_CV,pca_all1_mean_HD)
+pca_all1_distance
+
+###PCA for Boruta
+boruta_subset1 =df_log[,boruta_selected1] 
+pca_boruta1 = PCA(boruta_subset1)
+fviz_pca_ind(pca_boruta1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Boruta feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_boruta1_coords = pca_boruta1$ind$coord
+pca_boruta1_mean_CV = c(sum(pca_boruta1_coords[c(1:70),1])/70, sum(pca_boruta1_coords[c(1:70),2])/70)
+pca_boruta1_mean_HD = c(sum(pca_boruta1_coords[c(71:109),1])/39, sum(pca_boruta1_coords[c(71:109),2])/39)
+pca_boruta1_distance = euclidean(pca_boruta1_mean_CV,pca_boruta1_mean_HD)
+pca_boruta1_distance
+
+###PCA for Vita
+vita_subset1 = df_log[,vita_selected1]
+pca_vita1 = PCA(vita_subset1)
+fviz_pca_ind(pca_vita1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Vita feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_vita1_coords = pca_vita1$ind$coord
+pca_vita1_mean_CV = c(sum(pca_vita1_coords[c(1:70),1])/70, sum(pca_vita1_coords[c(1:70),2])/70) # vector of length 2 for the means of CV's PCA feature values
+pca_vita1_mean_HD = c(sum(pca_vita1_coords[c(71:109),1])/39, sum(pca_vita1_coords[c(71:109),2])/39) # vector of length 2 for the means of HD's PCA feature values
+pca_vita1_distance = euclidean(pca_vita1_mean_CV,pca_boruta1_mean_HD)
+pca_vita1_distance
+
+###PCA for Information Gain
+info_subset1 = df_log[,info_selected1]
+pca_info1 = PCA(info_subset1)
+fviz_pca_ind(pca_info1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Information Gain feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_info1_coords = pca_info1$ind$coord
+pca_info1_mean_CV = c(sum(pca_info1_coords[c(1:70),1])/70, sum(pca_info1_coords[c(1:70),2])/70)
+pca_info1_mean_HD = c(sum(pca_info1_coords[c(71:109),1])/39, sum(pca_info1_coords[c(71:109),2])/39)
+pca_info1_distance = euclidean(pca_info1_mean_CV,pca_info1_mean_HD)
+pca_info1_distance
+
+###PCA for Wilcoxon
+wil_subset1 = df_log[,wil_selected1]
+pca_wil1 = PCA(wil_subset1)
+fviz_pca_ind(pca_wil1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Wilcoxon feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_wil1_coords = pca_wil1$ind$coord
+pca_wil1_mean_CV = c(sum(pca_wil1_coords[c(1:70),1])/70, sum(pca_wil1_coords[c(1:70),2])/70)
+pca_wil1_mean_HD = c(sum(pca_wil1_coords[c(71:109),1])/39, sum(pca_wil1_coords[c(71:109),2])/39)
+pca_wil1_distance = euclidean(pca_wil1_mean_CV,pca_wil1_mean_HD)
+pca_wil1_distance
+
+###PCA for Lasso
+lasso_subset1 = df_log[,lasso_selected1]
+pca_lasso1 = PCA(lasso_subset1)
+fviz_pca_ind(pca_lasso1, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_log$status, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Lasso feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_lasso1_coords = pca_lasso1$ind$coord
+pca_lasso1_mean_CV = c(sum(pca_lasso1_coords[c(1:70),1])/70, sum(pca_lasso1_coords[c(1:70),2])/70)
+pca_lasso1_mean_HD = c(sum(pca_lasso1_coords[c(71:109),1])/39, sum(pca_lasso1_coords[c(71:109),2])/39)
+pca_lasso1_distance = euclidean(pca_lasso1_mean_CV,pca_lasso1_mean_HD)
+pca_lasso1_distance
+```
+
+
+
+
+
+### PCA Plots for Active vs. Recovered
+```{r}
+### PCA plot for all features
+pca_all2 = PCA(df_AR[, -c(709:710)])
+fviz_pca_ind(pca_all2, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("No Feature Selection") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_all2_coords = pca_all2$ind$coord
+pca_all2_mean_REC = c(sum(pca_all2_coords[c(1:19),1])/20, sum(pca_all2_coords[c(1:19),2])/20) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_all2_mean_ACT = c(sum(pca_all2_coords[c(20:69),1])/50, sum(pca_all2_coords[c(20:69),2])/50) # vector of length 2 for the means of Active Patient's PCA feature values
+pca_all2_distance = euclidean(pca_all2_mean_ACT,pca_all2_mean_REC)
+pca_all2_distance
+
+###PCA for Boruta
+boruta_subset2 =df_AR[, boruta_selected2] 
+pca_boruta2 = PCA(boruta_subset2)
+fviz_pca_ind(pca_boruta2, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Boruta feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_boruta2_coords = pca_boruta2$ind$coord
+pca_boruta2_mean_REC = c(sum(pca_boruta2_coords[c(1:19),1])/20, sum(pca_boruta2_coords[c(1:19),2])/20)
+pca_boruta2_mean_ACT = c(sum(pca_boruta2_coords[c(20:69),1])/50, sum(pca_boruta2_coords[c(20:69),2])/50)
+pca_boruta2_distance = euclidean(pca_boruta2_mean_REC,pca_boruta2_mean_ACT)
+pca_boruta2_distance
+
+###PCA for Vita
+vita_subset2 =df_AR[, vita_selected2] 
+pca_vita2 = PCA(vita_subset2)
+fviz_pca_ind(pca_vita2, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Vita feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_vita2_coords = pca_vita2$ind$coord
+pca_vita2_mean_REC = c(sum(pca_vita2_coords[c(1:19),1])/20, sum(pca_vita2_coords[c(1:19),2])/20)
+pca_vita2_mean_ACT = c(sum(pca_vita2_coords[c(20:69),1])/50, sum(pca_vita2_coords[c(20:69),2])/50)
+pca_vita2_distance = euclidean(pca_vita2_mean_ACT,pca_vita2_mean_REC)
+pca_vita2_distance
+
+###PCA for Information Gain
+info_subset2 =df_AR[, info_selected2] 
+pca_info2 = PCA(info_subset2)
+fviz_pca_ind(pca_info2, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Information Gain feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_info2_coords = pca_info2$ind$coord
+pca_info2_mean_REC = c(sum(pca_info2_coords[c(1:19),1])/20, sum(pca_info2_coords[c(1:19),2])/20)
+pca_info2_mean_ACT = c(sum(pca_info2_coords[c(20:69),1])/50, sum(pca_info2_coords[c(20:69),2])/50)
+pca_info2_distance = euclidean(pca_info2_mean_ACT,pca_info2_mean_REC)
+pca_info2_distance
+
+###PCA for Wilcoxon
+wil_subset2 = df_AR[, wil_selected2] 
+pca_wil2 = PCA(wil_subset2)
+fviz_pca_ind(pca_wil2, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Wilcoxon feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_wil2_coords = pca_wil2$ind$coord
+pca_wil2_mean_REC = c(sum(pca_wil2_coords[c(1:19),1])/20, sum(pca_wil2_coords[c(1:19),2])/20)
+pca_wil2_mean_ACT = c(sum(pca_wil2_coords[c(20:69),1])/50, sum(pca_wil2_coords[c(20:69),2])/50)
+pca_wil2_distance = euclidean(pca_wil2_mean_ACT,pca_wil2_mean_REC)
+pca_wil2_distance
+
+###PCA for Lasso
+lasso_subset2 = df_AR[,lasso_selected2]
+pca_lasso2 = PCA(lasso_subset2)
+fviz_pca_ind(pca_lasso2, 
+              geom.ind = "point", 
+              pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_AR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Lasso feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_lasso2_coords = pca_lasso2$ind$coord
+pca_lasso2_mean_REC = c(sum(pca_lasso2_coords[c(1:19),1])/20, sum(pca_lasso2_coords[c(1:19),2])/20)
+pca_lasso2_mean_ACT = c(sum(pca_lasso1_coords[c(20:69),1])/50, sum(pca_lasso2_coords[c(20:69),2])/50)
+pca_lasso2_distance = euclidean(pca_lasso2_mean_REC,pca_lasso2_mean_ACT)
+pca_lasso2_distance
+```
+
+
+
+### PCA Plots for Healthy vs. Recovered
+```{r}
+### PCA plot for all features
+pca_all3 = PCA(df_HR[, -c(709:710)])
+fviz_pca_ind(pca_all3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("No Feature Selection") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_all3_coords = pca_all3$ind$coord
+pca_all3_mean_HD = c(sum(pca_all3_coords[c(1:19),1])/19, sum(pca_all3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_all3_mean_Rec = c(sum(pca_all3_coords[c(20:42),1])/23, sum(pca_all3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_all3_distance = euclidean(pca_all3_mean_HD,pca_all3_mean_Rec)
+pca_all3_distance
+
+###PCA for Wilcoxon
+wil_subset3 =df_HR[, wil_selected3] 
+pca_wil3 = PCA(wil_subset3)
+fviz_pca_ind(pca_wil3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Wilcoxon feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_wil3_coords = pca_wil3$ind$coord
+pca_wil3_mean_HD = c(sum(pca_wil3_coords[c(1:19),1])/19, sum(pca_wil3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_wil3_mean_Rec = c(sum(pca_wil3_coords[c(20:42),1])/23, sum(pca_wil3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_wil3_distance = euclidean(pca_wil3_mean_HD,pca_wil3_mean_Rec)
+pca_wil3_distance
+
+###PCA for Boruta
+boruta_subset3 =df_HR[, boruta_selected3] 
+pca_boruta3 = PCA(boruta_subset3)
+fviz_pca_ind(pca_boruta3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Boruta feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_boruta3_coords = pca_boruta3$ind$coord
+pca_boruta3_mean_HD = c(sum(pca_boruta3_coords[c(1:19),1])/19, sum(pca_boruta3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_boruta3_mean_Rec = c(sum(pca_boruta3_coords[c(20:42),1])/23, sum(pca_boruta3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_boruta3_distance = euclidean(pca_boruta3_mean_HD,pca_boruta3_mean_Rec)
+pca_boruta3_distance
+
+###PCA for Vita
+vita_subset3 =df_HR[, vita_selected3] 
+pca_vita3 = PCA(vita_subset3)
+fviz_pca_ind(pca_vita3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Vita feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_vita3_coords = pca_vita3$ind$coord
+pca_vita3_mean_HD = c(sum(pca_vita3_coords[c(1:19),1])/19, sum(pca_vita3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_vita3_mean_Rec = c(sum(pca_vita3_coords[c(20:42),1])/23, sum(pca_vita3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_vita3_distance = euclidean(pca_vita3_mean_HD,pca_vita3_mean_Rec)
+pca_vita3_distance
+
+###PCA for Information Gain
+info_subset3 =df_HR[, info_selected3] 
+pca_info3 = PCA(info_subset3)
+fviz_pca_ind(pca_info3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Information Gain feature subsett") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_info3_coords = pca_info3$ind$coord
+pca_info3_mean_HD = c(sum(pca_info3_coords[c(1:19),1])/19, sum(pca_info3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_info3_mean_Rec = c(sum(pca_info3_coords[c(20:42),1])/23, sum(pca_info3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_info3_distance = euclidean(pca_info3_mean_HD,pca_info3_mean_Rec)
+pca_info3_distance
+
+###PCA for Lasso
+lasso_subset3 =df_HR[, lasso_selected3] 
+pca_lasso3 = PCA(lasso_subset3)
+fviz_pca_ind(pca_lasso3, geom.ind = "point", pointshape = 21, 
+              pointsize = 2, 
+              fill.ind = df_HR$disease.stage, 
+              col.ind = "black", 
+              palette = "jco", 
+              #addEllipses = TRUE,
+              label = "var",
+              col.var = "black",
+              repel = TRUE,
+              legend.title = "Status") +
+     ggtitle("Lasso feature subset") +
+     theme(plot.title = element_text(hjust = 0.5))
+#Calculate Euclidean distance between two subjects
+pca_lasso3_coords = pca_lasso3$ind$coord
+pca_lasso3_mean_HD = c(sum(pca_lasso3_coords[c(1:19),1])/19, sum(pca_lasso3_coords[c(1:19),2])/19) # vector of length 2 for the means of Healthy Donor's PCA feature values
+pca_lasso3_mean_Rec = c(sum(pca_lasso3_coords[c(20:42),1])/23, sum(pca_lasso3_coords[c(20:42),2])/23) # vector of length 2 for the means of Recovered Patient's PCA feature values
+pca_lasso3_distance = euclidean(pca_lasso3_mean_HD,pca_lasso3_mean_Rec)
+pca_lasso3_distance
+```
+
+
